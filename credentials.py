@@ -1,7 +1,4 @@
-"""
-Secure credential management for router controller.
-Uses macOS keychain system (accessible via Passwords app in macOS Sonoma+).
-"""
+"""Secure credential management using macOS keychain"""
 
 from typing import Tuple, Optional, TYPE_CHECKING
 import keyring

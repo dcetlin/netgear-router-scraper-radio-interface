@@ -1,6 +1,4 @@
-"""
-Chrome WebDriver management for router controller.
-"""
+"""Chrome WebDriver management for router controller"""
 
 from typing import Optional, TYPE_CHECKING
 from selenium import webdriver

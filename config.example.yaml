@@ -2,7 +2,7 @@
 # Copy this file to ~/.router_controller_config.yaml and customize as needed
 
 # Network settings
-target_network: "1_lemonlemon_1"  # WiFi network name to check for router connection
+target_network: "Your_WiFi_Name"  # WiFi network name to check for router connection
 
 # Router URLs
 router_url: "https://routerlogin.net/"

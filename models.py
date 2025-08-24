@@ -1,6 +1,4 @@
-"""
-Data models and enums for router radio controller.
-"""
+"""Data models and enums for router radio controller"""
 
 from enum import Enum
 from dataclasses import dataclass
@@ -12,6 +10,7 @@ class RadioStatus(Enum):
     RADIO_ON = "RADIO_ON"
     RADIO_OFF = "RADIO_OFF"
     NOT_CONNECTED_TO_ROUTER = "NOT_CONNECTED_TO_ROUTER"
+    VPN_CONNECTED = "VPN_CONNECTED"
     UNEXPECTED_FAILURE = "UNEXPECTED_FAILURE"
 
 
@@ -20,13 +19,14 @@ class ActionResult(Enum):
     ALREADY_ON = "ALREADY_ON"
     ALREADY_OFF = "ALREADY_OFF"
     NOT_CONNECTED_TO_ROUTER = "NOT_CONNECTED_TO_ROUTER"
+    VPN_CONNECTED = "VPN_CONNECTED"
     UNEXPECTED_FAILURE = "UNEXPECTED_FAILURE"
 
 
 @dataclass
 class RouterConfig:
     """Configuration for router connection"""
-    target_network: str = "1_lemonlemon_1"
+    target_network: str = "Your_WiFi_Name"
     router_url: str = "https://routerlogin.net/"
     admin_url: str = "https://routerlogin.net/adv_index.htm"
     timeout: int = 10
@@ -39,7 +39,7 @@ class RouterConfig:
     
     @classmethod
     def from_yaml(cls, config_path: Optional[Path] = None) -> 'RouterConfig':
-        """Load configuration from YAML file"""
+        """Load configuration from YAML file with validation"""
         if config_path is None:
             config_path = Path.home() / ".router_controller_config.yaml"
         
@@ -50,11 +50,30 @@ class RouterConfig:
             import yaml
             with open(config_path, 'r') as f:
                 data = yaml.safe_load(f) or {}
-            return cls(**{k: v for k, v in data.items() if hasattr(cls, k)})
+            
+            # Validate configuration values
+            validated_data = {}
+            for k, v in data.items():
+                if hasattr(cls, k):
+                    if k == 'timeout' and (not isinstance(v, int) or v < 1):
+                        print(f"⚠️  Invalid timeout value '{v}', using default: 10")
+                        continue
+                    if k == 'retry_attempts' and (not isinstance(v, int) or v < 1):
+                        print(f"⚠️  Invalid retry_attempts value '{v}', using default: 3")
+                        continue
+                    if k in ['headless', 'enable_notifications', 'debug_mode'] and not isinstance(v, bool):
+                        print(f"⚠️  Invalid boolean value for '{k}': {v}, using default")
+                        continue
+                    validated_data[k] = v
+                else:
+                    print(f"⚠️  Unknown configuration key '{k}' ignored")
+            
+            return cls(**validated_data)
         except ImportError:
-            # Fall back to default if PyYAML not installed
+            print("⚠️  PyYAML not installed, using default configuration")
             return cls()
-        except Exception:
+        except Exception as e:
+            print(f"⚠️  Error loading config file: {e}, using default configuration")
             return cls()
     
     def to_yaml(self, config_path: Optional[Path] = None) -> bool:

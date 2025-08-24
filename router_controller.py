@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Router 2.4GHz Radio Controller
-A composable, elegant script for managing router radio settings via Selenium.
-"""
+"""Router 2.4GHz Radio Controller"""
 
 import time
 from typing import Optional, Tuple
@@ -11,25 +8,39 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException
 
 from models import RadioStatus, ActionResult, RouterConfig
 from logger import Logger
 from network import NetworkChecker
 from credentials import CredentialManager
 from webdriver_manager import WebDriverManager
-from utils import retry, send_notification
-from exceptions import NetworkConnectionError, AuthenticationError, RouterUIError
-
-
+from utils import retry, send_notification, format_status_output
 
 
 class RouterController:
     """Main controller for router radio management"""
     
+    # Reusable CSS selectors for better performance
+    SELECTORS = {
+        'ssl_advanced': '#details-button',
+        'ssl_proceed': '#proceed-link',
+        'login_username': '[name="username"]',
+        'login_password': '[name="password"]',
+        'login_button': 'a[onclick*="login"]',
+        'advanced_button': '#advanced_bt',
+        'content_icons': '#content_icons',
+        'wireless_bgn': '#title_bgn',
+        'wireless_status': '#words_title div[class*="img_status"]',
+        'wireless_link': '#wladv',
+        'formframe': '[name="formframe"]',
+        'radio_checkbox': '#enable_ap',
+        'apply_button': '#apply'
+    }
+    
     def __init__(self, config: RouterConfig = None):
         self.config = config or RouterConfig.from_yaml()
-        self.logger = Logger()
+        self.logger = Logger(dynamic=not self.config.debug_mode)
         self.network_checker = NetworkChecker(self.logger, self.config.target_network)
         self.credential_manager = CredentialManager(self.logger, self.config.service_name)
         self.webdriver_manager = WebDriverManager(self.logger, self.config.headless, self.config.debug_mode)
@@ -41,14 +52,17 @@ class RouterController:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit with cleanup"""
+        self.logger.clear_line()  # Clear dynamic log line
         self.webdriver_manager.cleanup()
     
-    def _ensure_network_connection(self) -> bool:
-        """Verify network connectivity"""
+    def _ensure_network_connection(self) -> tuple[bool, str]:
+        """Verify network connectivity and VPN status"""
+        if self.network_checker.is_vpn_connected():
+            return False, "VPN_CONNECTED"
         if not self.network_checker.is_connected_to_target_network():
             self.logger.error("Not connected to target network")
-            return False
-        return True
+            return False, "NOT_CONNECTED_TO_ROUTER"
+        return True, "OK"
     
     def _get_credentials(self) -> Tuple[str, str]:
         """Get admin credentials"""
@@ -56,6 +70,32 @@ class RouterController:
         if not username or not password:
             username, password = self.credential_manager.prompt_for_credentials()
         return username, password
+    
+    def _find_element_in_frames(self, selector: str, max_wait: int = 5):
+        """Efficiently find element across main page and iframes"""
+        wait = WebDriverWait(self.driver, max_wait)
+        
+        # Try main page first
+        try:
+            return wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+        except TimeoutException:
+            pass
+        
+        # Try each iframe
+        iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+        for i, iframe in enumerate(iframes):
+            try:
+                self.driver.switch_to.frame(iframe)
+                element = WebDriverWait(self.driver, 2).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                self.logger.debug(f"Found element in iframe {i}")
+                return element
+            except TimeoutException:
+                self.driver.switch_to.default_content()
+                continue
+        
+        raise TimeoutException(f"Element {selector} not found in main page or iframes")
     
     def _initialize_driver(self):
         """Initialize WebDriver if needed"""
@@ -75,13 +115,14 @@ class RouterController:
                 advanced_button = wait.until(EC.element_to_be_clickable((By.ID, "details-button")))
                 advanced_button.click()
                 self.logger.debug("Clicked Advanced button")
-                time.sleep(1)
                 
                 # Click "Proceed to routerlogin.net (unsafe)" link
                 proceed_link = wait.until(EC.element_to_be_clickable((By.ID, "proceed-link")))
                 proceed_link.click()
                 self.logger.info("Clicked proceed link, bypassing SSL warning")
-                time.sleep(2)
+                
+                # Wait for page to change after SSL bypass
+                wait.until(lambda driver: "Your connection is not private" not in driver.page_source)
                 
                 return True
             
@@ -121,7 +162,14 @@ class RouterController:
             login_button.click()
             
             self.logger.info("Login submitted, waiting for page load")
-            time.sleep(3)  # Give more time for potential redirects
+            
+            # Wait for the page to actually change after login submission
+            # The router needs time to process login and redirect
+            time.sleep(2)
+            
+            # Wait for either admin panel or multi-login page to load
+            wait.until(lambda driver: any(indicator in driver.page_source.lower() 
+                                        for indicator in ['advanced', 'setup', 'wireless', 'multi_login']))
             
             # Check if we got redirected to multi-login page
             current_url = self.driver.current_url
@@ -152,8 +200,8 @@ class RouterController:
                             yes_button = self.driver.find_element(By.CSS_SELECTOR, selector)
                             yes_button.click()
                             self.logger.info(f"Clicked proceed button: {selector}")
-                            time.sleep(3)
-                            # Check if we successfully got past multi-login
+                            # Wait for page to change after multi-login handling
+                            wait.until(lambda driver: "multi_login" not in driver.current_url.lower())
                             new_url = self.driver.current_url
                             self.logger.info(f"After multi-login handling, current URL: {new_url}")
                             break
@@ -163,17 +211,17 @@ class RouterController:
                 except Exception as e:
                     self.logger.warning(f"Failed to handle multi-login: {e}")
                     
+            # Final success check: look for admin panel indicators first
+            if any(indicator in self.driver.page_source.lower() for indicator in ['advanced', 'setup', 'wireless', 'router']):
+                self.logger.info("Successfully logged into admin panel")
+                return True
+            
             # Check if we're still on login page (login failed)
             elif "login" in current_url.lower():
                 # Additional check: make sure we're actually on login page, not just a URL with "login" in it
                 if self.driver.find_elements(By.NAME, "username") and self.driver.find_elements(By.NAME, "password"):
                     self.logger.warning("Still on login page after submission, login may have failed")
                     return False
-            
-            # Final success check: look for admin panel indicators
-            if any(indicator in self.driver.page_source.lower() for indicator in ['advanced', 'setup', 'wireless', 'router']):
-                self.logger.info("Successfully logged into admin panel")
-                return True
                 
             return True
             
@@ -207,9 +255,6 @@ class RouterController:
                     self.logger.info("DEBUG: Admin page saved to /tmp/admin_page_debug.html")
                 raise
             self.logger.info("Advanced Setup button clicked, waiting for content to load...")
-            
-            # Give a brief wait for the page to start loading content
-            time.sleep(2)
             
             # Check iframes first (where content typically loads for this router)
             iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
@@ -274,7 +319,8 @@ class RouterController:
                 if iframes:
                     self.logger.debug(f"Found {len(iframes)} iframes, switching to first one")
                     self.driver.switch_to.frame(iframes[0])
-                    time.sleep(1)
+                    # Wait for content to load in the iframe
+                    WebDriverWait(self.driver, 3).until(EC.presence_of_element_located((By.ID, "content_icons")))
                     try:
                         content_div = self.driver.find_element(By.ID, "content_icons")
                         self.logger.debug("Found content_icons in iframe")
@@ -343,7 +389,6 @@ class RouterController:
                 if iframes:
                     self.logger.debug(f"Switching to iframe for toggle")
                     self.driver.switch_to.frame(iframes[1])  # Usually the content iframe
-                    time.sleep(1)
                     try:
                         content_div = self.driver.find_element(By.ID, "content_icons")
                         self.logger.debug("Found content_icons in iframe for toggle")
@@ -361,7 +406,6 @@ class RouterController:
             self.logger.info("Clicking Wireless Settings link to navigate to configuration page")
             wireless_link = wait.until(EC.element_to_be_clickable((By.ID, "wladv")))
             wireless_link.click()
-            time.sleep(3)  # Wait for navigation
             
             # The wireless configuration form loads into a frame called "formframe"
             # Switch to the formframe to access the actual wireless settings
@@ -369,7 +413,8 @@ class RouterController:
                 self.logger.debug("Switching to formframe to access wireless configuration")
                 formframe = wait.until(EC.presence_of_element_located((By.NAME, "formframe")))
                 self.driver.switch_to.frame(formframe)
-                time.sleep(2)  # Wait for form content to load
+                # Wait for the form content (checkbox) to load
+                wait.until(EC.presence_of_element_located((By.ID, "enable_ap")))
             except Exception as e:
                 self.logger.warning(f"Could not find formframe: {e}")
                 # Try by index if name doesn't work
@@ -378,7 +423,8 @@ class RouterController:
                     if "form" in iframe.get_attribute("name").lower():
                         self.driver.switch_to.frame(iframe)
                         self.logger.debug(f"Switched to iframe {i} for wireless config")
-                        time.sleep(2)
+                        # Wait for the form content to load
+                        wait.until(EC.presence_of_element_located((By.ID, "enable_ap")))
                         break
             
             # Now we should be in the wireless configuration frame
@@ -431,7 +477,6 @@ class RouterController:
                     # Fallback: use JavaScript to click the checkbox directly
                     self.driver.execute_script("arguments[0].click();", checkbox)
                     self.logger.info(f"Radio checkbox {'enabled' if enable else 'disabled'} (used JavaScript)")
-                time.sleep(1)
             
             # Apply changes - look for Apply button
             apply_selectors = [
@@ -455,7 +500,20 @@ class RouterController:
             
             apply_button.click()
             self.logger.info("Apply button clicked, waiting for changes to take effect")
-            time.sleep(5)  # Wait for changes to take effect
+            
+            # Wait for either page refresh or success indicator
+            try:
+                # Wait for the page to refresh/redirect after applying changes
+                # The router typically shows a "Please wait..." message or redirects
+                wait.until(lambda driver: 
+                    "please wait" in driver.page_source.lower() or 
+                    driver.current_url != self.driver.current_url
+                )
+                # Additional short wait for settings to actually apply on router
+                time.sleep(3)
+            except TimeoutException:
+                # Fallback: fixed wait if we can't detect page change
+                time.sleep(5)
             
             result = ActionResult.SUCCESS
             if self.config.enable_notifications:
@@ -484,7 +542,10 @@ class RouterController:
         """Check current radio status"""
         self.logger.info("Checking 2.4GHz radio status")
         
-        if not self._ensure_network_connection():
+        connection_ok, connection_status = self._ensure_network_connection()
+        if not connection_ok:
+            if connection_status == "VPN_CONNECTED":
+                return RadioStatus.VPN_CONNECTED
             return RadioStatus.NOT_CONNECTED_TO_ROUTER
         
         try:
@@ -506,7 +567,10 @@ class RouterController:
         """Turn on 2.4GHz radio"""
         self.logger.info("Turning on 2.4GHz radio")
         
-        if not self._ensure_network_connection():
+        connection_ok, connection_status = self._ensure_network_connection()
+        if not connection_ok:
+            if connection_status == "VPN_CONNECTED":
+                return ActionResult.VPN_CONNECTED
             return ActionResult.NOT_CONNECTED_TO_ROUTER
         
         try:
@@ -528,7 +592,10 @@ class RouterController:
         """Turn off 2.4GHz radio"""
         self.logger.info("Turning off 2.4GHz radio")
         
-        if not self._ensure_network_connection():
+        connection_ok, connection_status = self._ensure_network_connection()
+        if not connection_ok:
+            if connection_status == "VPN_CONNECTED":
+                return ActionResult.VPN_CONNECTED
             return ActionResult.NOT_CONNECTED_TO_ROUTER
         
         try:
@@ -552,33 +619,16 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Router 2.4GHz Radio Controller - Elegant automation for Netgear router radio management",
-        epilog="""
-Examples:
-  python router_controller.py status              Check radio status
-  python router_controller.py on                  Turn radio on
-  python router_controller.py off                 Turn radio off
-  python router_controller.py on --headless       Turn on in background
-  python router_controller.py status --notifications  Enable notifications
-  python router_controller.py on --config ~/my_config.yaml  Use custom config
-
-Configuration:
-  Copy config.example.yaml to ~/.router_controller_config.yaml to customize settings.
-  Credentials are stored securely in macOS Keychain.
-        """,
+        description="Control Netgear router 2.4GHz radio",
+        epilog="Examples:\n  status    Check radio status\n  on        Turn radio on\n  off       Turn radio off",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    parser.add_argument("action", choices=["status", "on", "off"], 
-                       help="Action to perform: check status, turn radio on, or turn radio off")
-    parser.add_argument("--headless", action="store_true",
-                       help="Run browser in headless mode (no GUI, good for automation)")
-    parser.add_argument("--config", type=str, metavar="PATH",
-                       help="Path to custom YAML configuration file")
-    parser.add_argument("--notifications", action="store_true",
-                       help="Enable macOS notifications for status changes")
-    parser.add_argument("--debug", action="store_true",
-                       help="Enable debug mode (keeps browser open on failure)")
+    parser.add_argument("action", choices=["status", "on", "off"], help="Action to perform")
+    parser.add_argument("--headless", action="store_true", help="Run in background")
+    parser.add_argument("--config", type=str, metavar="PATH", help="Custom config file")
+    parser.add_argument("--notifications", action="store_true", help="Enable notifications")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     
     args = parser.parse_args()
     
@@ -600,13 +650,13 @@ Configuration:
     with RouterController(config) as controller:
         if args.action == "status":
             result = controller.check_radio_status()
-            print(f"Radio Status: {result.value}")
+            print(format_status_output(result.value, "status"))
         elif args.action == "on":
             result = controller.turn_on_radio()
-            print(f"Turn On Result: {result.value}")
+            print(format_status_output(result.value, "on"))
         elif args.action == "off":
             result = controller.turn_off_radio()
-            print(f"Turn Off Result: {result.value}")
+            print(format_status_output(result.value, "off"))
 
 
 if __name__ == "__main__":

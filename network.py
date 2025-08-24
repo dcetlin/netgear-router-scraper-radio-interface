@@ -1,6 +1,4 @@
-"""
-Network connectivity verification for router controller.
-"""
+"""Network connectivity verification for router controller"""
 
 import subprocess
 from typing import TYPE_CHECKING
@@ -15,6 +13,27 @@ class NetworkChecker:
     def __init__(self, logger: 'Logger', target_network: str):
         self.logger = logger
         self.target_network = target_network
+    
+    def is_vpn_connected(self) -> bool:
+        """Check if VPN is currently connected"""
+        try:
+            result = subprocess.run([
+                'scutil', '--nc', 'list'
+            ], capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                vpn_connected = 'Connected' in result.stdout
+                if vpn_connected:
+                    self.logger.warning("VPN connection detected - please disconnect VPN and try again")
+                else:
+                    self.logger.debug("No VPN connection detected")
+                return vpn_connected
+            else:
+                self.logger.debug("Could not check VPN status")
+                return False
+        except Exception as e:
+            self.logger.debug(f"VPN check failed: {e}")
+            return False
     
     def is_connected_to_target_network(self) -> bool:
         """Check if connected to target WiFi network or wired connection"""

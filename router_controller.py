@@ -2,6 +2,7 @@
 """Router 2.4GHz Radio Controller"""
 
 import time
+from datetime import datetime
 from typing import Optional, Tuple
 
 from selenium import webdriver
@@ -631,6 +632,8 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     
     args = parser.parse_args()
+
+    start_time = datetime.now()
     
     # Load configuration
     if args.config:
@@ -658,6 +661,8 @@ def main():
             result = controller.turn_off_radio()
             print(format_status_output(result.value, "off"))
 
+    elapsed = datetime.now() - start_time
+    print(f"Total Time: {elapsed.total_seconds():.1f}s")
 
 if __name__ == "__main__":
     main()

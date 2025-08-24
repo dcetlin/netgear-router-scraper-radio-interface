@@ -14,7 +14,6 @@ class Logger:
         self.logger = logging.getLogger(name)
         self.dynamic = dynamic
         self.counter = 0
-        self.last_message_time = 0
         self._setup_logger()
     
     def _setup_logger(self):
@@ -47,16 +46,31 @@ class Logger:
             return
             
         self.counter += 1
-        current_time = time.time()
-        
-        # Show elapsed seconds since last message
-        elapsed = f"({int(current_time - self.last_message_time)}s)" if self.last_message_time > 0 else ""
         
         # Clear line and show new message with counter
-        sys.stdout.write(f"\r\033[K[{self.counter}] {message} {elapsed}")
+        sys.stdout.write(f"\r\033[K[{self.counter}] {message}")
         sys.stdout.flush()
+    
+    def _start_continuous_counter(self, message: str):
+        """Start a continuous counter for long operations"""
+        if not self.dynamic:
+            return None
+            
+        self.counter += 1
+        start_time = time.time()
         
-        self.last_message_time = current_time
+        def update_counter():
+            while not self._stop_counter.is_set():
+                elapsed = int(time.time() - start_time)
+                sys.stdout.write(f"\r\033[K[{self.counter}] {message} ({elapsed}s)")
+                sys.stdout.flush()
+                time.sleep(1)
+        
+        self._stop_counter = threading.Event()
+        counter_thread = threading.Thread(target=update_counter, daemon=True)
+        counter_thread.start()
+        
+        return self._stop_counter
     
     def info(self, message: str):
         self.logger.info(message)
@@ -81,28 +95,3 @@ class Logger:
             sys.stdout.write(f"\r\033[K")
             sys.stdout.flush()
     
-    def progress_spinner(self, message: str, duration: float = None):
-        """Show a spinning progress indicator for long operations"""
-        if not self.dynamic:
-            self.info(message)
-            return
-            
-        spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-        self.counter += 1
-        start_time = time.time()
-        
-        def spin():
-            i = 0
-            while not stop_spinner.is_set():
-                elapsed = int(time.time() - start_time)
-                char = spinner_chars[i % len(spinner_chars)]
-                sys.stdout.write(f"\r\033[K[{self.counter}] {char} {message} ({elapsed}s)")
-                sys.stdout.flush()
-                time.sleep(0.1)
-                i += 1
-        
-        stop_spinner = threading.Event()
-        spinner_thread = threading.Thread(target=spin, daemon=True)
-        spinner_thread.start()
-        
-        return stop_spinner

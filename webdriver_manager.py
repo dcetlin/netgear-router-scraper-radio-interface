@@ -50,6 +50,5 @@ class WebDriverManager:
                     except (EOFError, KeyboardInterrupt):
                         self.logger.info("Debug mode interrupted, closing browser...")
                 self.driver.quit()
-                self.logger.debug("WebDriver cleaned up")
             except Exception as e:
                 self.logger.error(f"Error during cleanup: {e}")

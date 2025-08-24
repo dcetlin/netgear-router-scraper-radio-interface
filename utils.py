@@ -38,13 +38,17 @@ def retry(tries: int = 3, delay: int = 2, backoff: float = 1.5, exceptions: tupl
                         args[0].logger.warning(
                             f"Attempt {attempt}/{tries} failed: {type(e).__name__}: {e}"
                         )
-                        # Show retry progress with spinner if available
-                        if hasattr(args[0].logger, 'progress_spinner'):
-                            spinner = args[0].logger.progress_spinner(
-                                f"Retrying in {current_delay}s... (attempt {attempt + 1}/{tries})"
+                        
+                        # Show retry countdown with continuous counter
+                        if hasattr(args[0].logger, '_start_continuous_counter'):
+                            counter_stop = args[0].logger._start_continuous_counter(
+                                f"Retrying... (attempt {attempt + 1}/{tries})"
                             )
-                            time.sleep(current_delay)
-                            spinner.set()
+                            if counter_stop:
+                                time.sleep(current_delay)
+                                counter_stop.set()
+                            else:
+                                time.sleep(current_delay)
                         else:
                             time.sleep(current_delay)
                     else:

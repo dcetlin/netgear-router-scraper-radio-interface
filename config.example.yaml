@@ -1,0 +1,23 @@
+# Router Radio Controller Configuration
+# Copy this file to ~/.router_controller_config.yaml and customize as needed
+
+# Network settings
+target_network: "1_lemonlemon_1"  # WiFi network name to check for router connection
+
+# Router URLs
+router_url: "https://routerlogin.net/"
+admin_url: "https://routerlogin.net/adv_index.htm"
+
+# Timeouts and retry settings
+timeout: 10              # WebDriver timeout in seconds
+retry_attempts: 3        # Number of retry attempts for transient failures
+retry_delay: 2           # Initial delay between retries in seconds
+
+# Browser settings
+headless: false          # Run browser in headless mode (true/false)
+
+# Security settings
+service_name: "router_admin"  # Keychain service name for credentials
+
+# Notification settings
+enable_notifications: false  # Enable macOS notifications (true/false)

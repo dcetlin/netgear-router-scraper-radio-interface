@@ -1,0 +1,14 @@
+on run
+	set choices to {"on", "off", "status"}
+	set picked to choose from list choices with prompt "Select command:" default items {"status"}
+	if picked is false then return
+	set arg to item 1 of picked
+	
+	set scriptPath to "/{path_to_script}/router_controller"
+	set cmd to quoted form of scriptPath & " " & quoted form of arg & " --headless"
+	
+	tell application "Terminal"
+		activate
+		do script cmd
+	end tell
+end run

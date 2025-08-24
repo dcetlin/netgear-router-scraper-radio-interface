@@ -42,6 +42,24 @@ enable_notifications: false
 🟢 RADIO ON    🔴 RADIO OFF    🔒 VPN DETECTED    ❌ FAILED
 ```
 
+## Create macOS Apps for Easy Access
+
+Create clickable apps for Dock/Spotlight access using **Script Editor**:
+
+1. Open **Script Editor** app (found in Applications/Utilities)
+2. Use the template script in `/script_editor_helpers/`
+3. Update the path and save as Application (.app)
+
+This creates three `.app` bundles:
+- **Router Radio Status.app** - Check radio status
+- **Router Radio On.app** - Turn radio on
+- **Router Radio Off.app** - Turn radio off
+
+Apps automatically enable notifications and can be:
+- Dragged to Dock for one-click access
+- Found via Spotlight search ("Router Radio")
+- Double-clicked from Finder
+
 ## Brief Explanation of Implementation
 
 Uses Selenium WebDriver to automate Chrome browser:

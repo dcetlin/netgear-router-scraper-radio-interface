@@ -1,4 +1,5 @@
 """Secure credential management using macOS keychain"""
+import getpass
 
 from typing import Tuple, Optional, TYPE_CHECKING
 import keyring
@@ -45,7 +46,7 @@ class CredentialManager:
         print("\nRouter admin credentials not found.")
         print("These will be stored securely in macOS keychain (viewable in Passwords app).")
         username = input("Enter admin username: ").strip()
-        password = input("Enter admin password: ").strip()
+        password = getpass.getpass("Enter admin password: ").strip()
         
         if input("Store credentials securely in keychain? (y/N): ").lower().startswith('y'):
             self.store_credentials(username, password)

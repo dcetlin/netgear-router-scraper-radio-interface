@@ -1,101 +1,91 @@
 # Router Radio Controller
 
-Control your Netgear router's 2.4GHz radio via command line.
+Turn a Netgear router's **2.4 GHz Wi-Fi radio** on and off from your Mac. Use the menu bar or the command line. Wired Ethernet keeps working either way.
+
+Built for the Nighthawk BE9300 (RS300, firmware V1.2.7.2). It should work on other Netgear routers that use the same admin pages.
 
 ## Setup on a new Mac
 
-Everything is in this repo except your router login, which stays in the Keychain.
-
 ```bash
-xcode-select --install          # Swift compiler for the menu bar app (skip if already installed)
+xcode-select --install     # Apple's command-line tools, for the menu bar app (skip if installed)
 git clone https://github.com/dcetlin/netgear-router-scraper-radio-interface.git router-radio-toggle
 cd router-radio-toggle
-./router_controller status      # first run: builds the venv, then asks for the router admin login and saves it to Keychain
-menubar/build.sh                # builds and installs /Applications/Router Radio.app
+./router_controller status # first run: sets up Python, asks for the router login, saves it to Keychain
+menubar/build.sh           # builds and installs /Applications/Router Radio.app
 open "/Applications/Router Radio.app"
 ```
 
-Needs Google Chrome, and the Mac must be on the router's network (Ethernet or its Wi-Fi). Optional settings go in `~/.router_controller_config.yaml` (see `config.example.yaml`); the defaults work for the BE9300.
+**Before you start, you need:**
+- Google Chrome installed.
+- The Mac on the router's network, by Ethernet or its Wi-Fi.
+- Any VPN turned off.
 
-## Usage
+**When you're asked:**
+- The router admin login is stored in the macOS Keychain under `router_admin`. It is never written to disk in the repo.
+- macOS may ask once to let Router Radio access the folder the repo is in. Allow it.
 
-```bash
-./router_controller status    # Check radio status
-./router_controller on        # Turn radio on  
-./router_controller off       # Turn radio off
-```
+## Menu bar app
 
-**Requirements:**
-- macOS with Chrome
-- Connected to router network
-- Disconnect VPN if active
+**Router Radio** puts an antenna icon in the menu bar:
 
-First run prompts for router credentials (stored in macOS Keychain).
+| Icon | Meaning |
+|---|---|
+| antenna | 2.4 GHz is **on** |
+| antenna with a slash | 2.4 GHz is **off** |
+| `…` | working (about 2s to check, about 7s to switch) |
+| triangle | can't tell. Open the menu for the reason. |
 
-## Options
+Click the icon to **Turn On / Turn Off** or **Refresh**. It re-checks every 15 minutes, so the icon stays accurate if the radio is changed some other way.
 
-```bash
-./router_controller status --headless        # Run in background
-./router_controller on --notifications       # Enable notifications
-./router_controller off --debug             # Debug mode
-```
+To make it start at login: **System Settings → General → Login Items → +**, then choose Router Radio.
 
-## Configuration
-
-Optional `~/.router_controller_config.yaml`:
-
-```yaml
-target_network: "Your_WiFi_Name"
-headless: false
-timeout: 10
-enable_notifications: false
-```
-
-## Status Output
-
-```
-🟢 RADIO ON    🔴 RADIO OFF    🔒 VPN DETECTED    ❌ FAILED
-```
-
-## Menu Bar App (recommended)
-
-`menubar/` holds **Router Radio**, a tiny native menu bar app (SwiftUI, built with `swiftc`, no Xcode). The icon shows whether the 2.4GHz radio is on or off; click it for Turn On / Turn Off / Refresh. It runs `router_controller ... --json` underneath and re-checks every 15 minutes.
+## Command line
 
 ```bash
-menubar/build.sh    # builds and installs /Applications/Router Radio.app
+./router_controller status   # 🟢 RADIO ON  or  🔴 RADIO OFF
+./router_controller on       # ✅ SUCCESS   or  🔵 ALREADY ON
+./router_controller off      # ✅ SUCCESS   or  🔵 ALREADY OFF
 ```
 
-First launch asks for access to Documents (where this repo lives); allow it once.
+| Flag | Effect |
+|---|---|
+| `--headless` | hide Chrome during on/off |
+| `--json` | print one line for scripts and apps: `{"action": "status", "result": "RADIO_OFF", "seconds": 2.0}` |
+| `--notifications` | show a macOS notification after on/off |
+| `--debug` | full log on screen; keeps Chrome open for inspection |
 
-## JSON Output
+| Result | Means |
+|---|---|
+| `RADIO_ON` / `RADIO_OFF` | current state (`status`) |
+| `SUCCESS` | changed, and the router confirmed it |
+| `ALREADY_ON` / `ALREADY_OFF` | nothing to do |
+| `NOT_CONNECTED_TO_ROUTER` | this Mac isn't on the router's network |
+| `VPN_CONNECTED` | turn off the VPN and try again |
+| `UNEXPECTED_FAILURE` | see `~/.router_controller.log`; rerun with `--debug` |
 
-`--json` prints one line for scripts and apps: `{"action": "status", "result": "RADIO_OFF", "seconds": 2.0}`
+Settings are optional. Copy `config.example.yaml` to `~/.router_controller_config.yaml` to change any default.
 
-## Create macOS Apps for Easy Access
+## How it works
 
-Create clickable apps for Dock/Spotlight access using **Script Editor**:
+1. **Checks the network.** It stops if a VPN is on, or if the Mac isn't on the router's Wi-Fi or any wired connection.
+2. **Reads the state over plain HTTP:** it logs in with the router's own form and reads the saved 2.4 GHz setting from `WLG_adv.htm`. No browser, about 2s. This is all `status` does.
+3. **Changes it in headless Chrome:** if the radio isn't already in the requested state, it ticks "Enable Wireless Router Radio" on the real Advanced Wireless page and clicks Apply. A browser is needed because that page's JavaScript builds the 80-odd fields the router expects.
+4. **Confirms over HTTP.** It reports `SUCCESS` only once the router reports the new state.
+   - The router allows one admin session at a time, so any other login (a browser tab, another run) can end this one. If that happens, it logs in again, and it retries the Apply once.
 
-1. Open **Script Editor** app (found in Applications/Utilities)
-2. Use the template script in `/script_editor_helpers/`
-3. Update the path and save as Application (.app)
+`./router_controller` is a small launcher. It creates `venv/` and installs `requirements.txt` on first run, then calls `venv/bin/python` directly, so moving the folder doesn't break it.
 
-This creates three `.app` bundles:
-- **Router Radio Status.app** - Check radio status
-- **Router Radio On.app** - Turn radio on
-- **Router Radio Off.app** - Turn radio off
+## Files
 
-Apps automatically enable notifications and can be:
-- Dragged to Dock for one-click access
-- Found via Spotlight search ("Router Radio")
-- Double-clicked from Finder
-
-## Brief Explanation of Implementation
-
-1. Checks VPN status and that the Mac is on the router's network (Wi-Fi or Ethernet)
-2. Logs in over plain HTTP and reads the saved 2.4GHz state from `WLG_adv.htm` (about 2s, no browser). This is all `status` does.
-3. For `on`/`off`, if the radio isn't already in that state: logs in through the real login page in headless Chrome, opens Advanced Wireless Settings, flips "Enable Wireless Router Radio" and clicks Apply. The browser is needed because that form's JavaScript builds the 80-odd fields the router expects.
-4. Confirms the change by re-reading the state over HTTP. Reports SUCCESS only once the router says so.
-
-Typical times on the BE9300 (firmware V1.2.7.2): status ~2s, on/off ~7s, already on/off ~2s.
-
-Self-contained executable manages Python environment and dependencies automatically.
+```
+router_controller          launcher (creates the venv, runs the CLI)
+router_controller.py       CLI and controller
+router_http.py             browser-free login and state read
+credentials.py             Keychain storage for the admin login
+network.py                 VPN and network checks
+webdriver_manager.py       headless Chrome
+logger.py, utils.py        logging, notifications, output formatting
+models.py                  result codes and config
+menubar/                   Router Radio menu bar app (SwiftUI) and its build script
+script_editor_helpers/     older AppleScript launcher: pick on/off/status in a dialog
+```

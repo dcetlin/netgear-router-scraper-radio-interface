@@ -26,14 +26,11 @@ class ActionResult(Enum):
 @dataclass
 class RouterConfig:
     """Configuration for router connection"""
-    target_network: str = "Your_WiFi_Name"
+    target_network: str = "1_lemonlemon_1"
     router_url: str = "https://routerlogin.net/"
-    admin_url: str = "https://routerlogin.net/adv_index.htm"
     timeout: int = 10
     service_name: str = "router_admin"
     headless: bool = False
-    retry_attempts: int = 3
-    retry_delay: int = 2
     enable_notifications: bool = False
     debug_mode: bool = False
     
@@ -57,9 +54,6 @@ class RouterConfig:
                 if hasattr(cls, k):
                     if k == 'timeout' and (not isinstance(v, int) or v < 1):
                         print(f"⚠️  Invalid timeout value '{v}', using default: 10")
-                        continue
-                    if k == 'retry_attempts' and (not isinstance(v, int) or v < 1):
-                        print(f"⚠️  Invalid retry_attempts value '{v}', using default: 3")
                         continue
                     if k in ['headless', 'enable_notifications', 'debug_mode'] and not isinstance(v, bool):
                         print(f"⚠️  Invalid boolean value for '{k}': {v}, using default")
@@ -86,12 +80,9 @@ class RouterConfig:
             config_dict = {
                 'target_network': self.target_network,
                 'router_url': self.router_url,
-                'admin_url': self.admin_url,
                 'timeout': self.timeout,
                 'service_name': self.service_name,
                 'headless': self.headless,
-                'retry_attempts': self.retry_attempts,
-                'retry_delay': self.retry_delay,
                 'enable_notifications': self.enable_notifications,
                 'debug_mode': self.debug_mode
             }

@@ -26,7 +26,8 @@ from utils import send_notification, format_status_output
 
 WIRELESS_PAGE = "WLG_adv.htm"   # Advanced > Advanced Setup > Wireless Settings
 RADIO_CHECKBOX = "enable_ap"    # "Enable Wireless Router Radio" for 2.4 GHz
-CONFIRM_TIMEOUT = 30            # seconds to wait for the router to report the new state
+CONFIRM_TIMEOUT = 15            # seconds to wait for the router to report the new state
+ATTEMPTS = 2                    # a competing admin login can void an Apply; try once more
 
 
 class RouterController:
@@ -34,7 +35,7 @@ class RouterController:
 
     def __init__(self, config: RouterConfig = None):
         self.config = config or RouterConfig.from_yaml()
-        self.logger = Logger(dynamic=not self.config.debug_mode)
+        self.logger = Logger(dynamic=not self.config.debug_mode, console=self.config.debug_mode)
         self.network_checker = NetworkChecker(self.logger, self.config.target_network)
         self.credential_manager = CredentialManager(self.logger, self.config.service_name)
         self.webdriver_manager = WebDriverManager(self.logger, self.config.headless, self.config.debug_mode)
@@ -76,7 +77,14 @@ class RouterController:
         return self._http
 
     def _radio_enabled(self) -> bool:
-        return self._router().radio_enabled()
+        try:
+            return self._router().radio_enabled()
+        except Exception:
+            # The router allows one admin session; a browser login (ours or anyone's) ends the
+            # HTTP one. Log in again once before giving up.
+            self.logger.debug("HTTP session ended, logging in again")
+            self._http = None
+            return self._router().radio_enabled()
 
     # --- changing state (browser) ---------------------------------------
 
@@ -143,9 +151,14 @@ class RouterController:
         try:
             if self._radio_enabled() == enable:
                 return ActionResult.ALREADY_ON if enable else ActionResult.ALREADY_OFF
-            self._apply_radio(enable)
-            if not self._wait_for_state(enable):
-                self.logger.error(f"Router did not report radio {word} within {CONFIRM_TIMEOUT}s")
+            for attempt in range(1, ATTEMPTS + 1):
+                self._apply_radio(enable)
+                if self._wait_for_state(enable):
+                    break
+                self.logger.warning(f"Router did not report radio {word} (attempt {attempt}/{ATTEMPTS})")
+                self.webdriver_manager.cleanup()
+                self.driver = None
+            else:
                 return ActionResult.UNEXPECTED_FAILURE
         except Exception as e:
             self.logger.error(f"Failed to turn radio {word}: {e}")
@@ -194,6 +207,7 @@ def main():
     parser.add_argument("--config", type=str, metavar="PATH", help="Custom config file")
     parser.add_argument("--notifications", action="store_true", help="Enable notifications")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--json", action="store_true", help="Print one JSON line (for apps and scripts)")
     args = parser.parse_args()
 
     start_time = datetime.now()
@@ -217,10 +231,13 @@ def main():
             result = controller.turn_on_radio()
         else:
             result = controller.turn_off_radio()
+    seconds = round((datetime.now() - start_time).total_seconds(), 1)
+    if args.json:
+        import json
+        print(json.dumps({"action": args.action, "result": result.value, "seconds": seconds}))
+    else:
         print(format_status_output(result.value, args.action))
-
-    elapsed = datetime.now() - start_time
-    print(f"Total Time: {elapsed.total_seconds():.1f}s")
+        print(f"Total Time: {seconds:.1f}s")
 
 
 if __name__ == "__main__":

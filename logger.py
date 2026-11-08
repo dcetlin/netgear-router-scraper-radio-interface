@@ -10,9 +10,11 @@ from pathlib import Path
 class Logger:
     """Dynamic single-line logging system with counter"""
     
-    def __init__(self, name: str = "RouterController", dynamic: bool = True):
+    def __init__(self, name: str = "RouterController", dynamic: bool = True, console: bool = False):
         self.logger = logging.getLogger(name)
-        self.dynamic = dynamic
+        # The live progress line only makes sense in a terminal; piped output (apps, scripts) stays clean.
+        self.dynamic = dynamic and sys.stdout.isatty()
+        self.console = console
         self.counter = 0
         self._setup_logger()
     
@@ -33,8 +35,8 @@ class Logger:
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
             
-            # Only add console handler if not in dynamic mode
-            if not self.dynamic:
+            # Full log lines on the console only when asked for (--debug)
+            if self.console:
                 console_handler = logging.StreamHandler()
                 console_handler.setLevel(logging.INFO)
                 console_handler.setFormatter(formatter)

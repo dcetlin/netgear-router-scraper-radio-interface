@@ -1,4 +1,5 @@
 """Chrome WebDriver management for router controller"""
+import os
 
 from typing import Optional, TYPE_CHECKING
 from selenium import webdriver
@@ -6,6 +7,10 @@ from selenium.webdriver.chrome.options import Options
 
 if TYPE_CHECKING:
     from .logger import Logger
+
+
+# Selenium Manager otherwise phones home and can print to stdout, which would corrupt --json output.
+os.environ.setdefault("SE_AVOID_STATS", "true")
 
 
 class WebDriverManager:
@@ -53,3 +58,5 @@ class WebDriverManager:
                 self.driver.quit()
             except Exception as e:
                 self.logger.error(f"Error during cleanup: {e}")
+            finally:
+                self.driver = None

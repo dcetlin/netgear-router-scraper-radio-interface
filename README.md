@@ -42,6 +42,20 @@ enable_notifications: false
 🟢 RADIO ON    🔴 RADIO OFF    🔒 VPN DETECTED    ❌ FAILED
 ```
 
+## Menu Bar App (recommended)
+
+`menubar/` holds **Router Radio**, a tiny native menu bar app (SwiftUI, built with `swiftc`, no Xcode). The icon shows whether the 2.4GHz radio is on or off; click it for Turn On / Turn Off / Refresh. It runs `router_controller ... --json` underneath and re-checks every 15 minutes.
+
+```bash
+menubar/build.sh    # builds and installs /Applications/Router Radio.app
+```
+
+First launch asks for access to Documents (where this repo lives); allow it once.
+
+## JSON Output
+
+`--json` prints one line for scripts and apps: `{"action": "status", "result": "RADIO_OFF", "seconds": 2.0}`
+
 ## Create macOS Apps for Easy Access
 
 Create clickable apps for Dock/Spotlight access using **Script Editor**:

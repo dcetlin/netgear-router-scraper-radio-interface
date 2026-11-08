@@ -1,14 +1,39 @@
 on run
-	set choices to {"on", "off", "status"}
-	set picked to choose from list choices with prompt "Select command:" default items {"status"}
+	set picked to choose from list {"on", "off", "status"} with prompt "Router 2.4 GHz radio:" default items {"status"}
 	if picked is false then return
-	set arg to item 1 of picked
-	
-	set scriptPath to "/{path_to_script}/router_controller"
-	set cmd to quoted form of scriptPath & " " & quoted form of arg & " --headless"
-	
-	tell application "Terminal"
-		activate
-		do script cmd
-	end tell
+	runRouter(item 1 of picked)
 end run
+
+on runRouter(arg)
+	set scriptPath to "/{path_to_script}/router_controller"
+
+	-- One window for the whole run: a live progress bar, then the result in the same window.
+	if arg is "status" then
+		set progress description to "Checking 2.4 GHz radio…"
+	else
+		set progress description to "Turning 2.4 GHz radio " & arg & "…"
+	end if
+	set progress additional description to "Talking to the router"
+	set progress total steps to -1
+
+	-- Run in the background and poll, so the window can draw and update while we wait.
+	set outFile to do shell script "mktemp -t routerctl"
+	do shell script "(" & quoted form of scriptPath & " " & arg & " --headless > " & outFile & " 2>&1; touch " & outFile & ".done) > /dev/null 2>&1 &"
+	set t to 0
+	repeat until (do shell script "test -e " & outFile & ".done && echo y || echo n") is "y"
+		delay 0.25
+		set t to t + 0.25
+		set progress additional description to "Talking to the router… " & (round t rounding down) & "s"
+	end repeat
+
+	set out to do shell script "tr '\\r' '\\n' < " & outFile & " | perl -pe 's/\\e\\[[0-9;]*[A-Za-z]//g' | grep -E 'RADIO|SUCCESS|ALREADY|FAILED|NOT CONNECTED|VPN DETECTED|Total' | sed 's/^\\[[0-9]*\\] //'; rm -f " & outFile & " " & outFile & ".done"
+	if out is "" then set out to "❌ FAILED" & return & "No result from the script"
+	set resultLine to paragraph 1 of out
+	if resultLine contains "SUCCESS" then set resultLine to "✅ Radio is now " & arg
+
+	set progress total steps to 1
+	set progress completed steps to 1
+	set progress description to resultLine
+	set progress additional description to paragraph -1 of out
+	delay 4
+end runRouter

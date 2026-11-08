@@ -62,11 +62,11 @@ Apps automatically enable notifications and can be:
 
 ## Brief Explanation of Implementation
 
-Uses Selenium WebDriver to automate Chrome browser:
-1. Checks VPN status and network connectivity
-2. Navigates to router admin panel (`https://routerlogin.net/`)
-3. Handles SSL warnings and login authentication
-4. Locates wireless settings in iframe content
-5. Toggles 2.4GHz radio checkbox and applies changes
+1. Checks VPN status and that the Mac is on the router's network (Wi-Fi or Ethernet)
+2. Logs in over plain HTTP and reads the saved 2.4GHz state from `WLG_adv.htm` (about 2s, no browser). This is all `status` does.
+3. For `on`/`off`, if the radio isn't already in that state: logs in through the real login page in headless Chrome, opens Advanced Wireless Settings, flips "Enable Wireless Router Radio" and clicks Apply. The browser is needed because that form's JavaScript builds the 80-odd fields the router expects.
+4. Confirms the change by re-reading the state over HTTP. Reports SUCCESS only once the router says so.
+
+Typical times on the BE9300 (firmware V1.2.7.2): status ~2s, on/off ~7s, already on/off ~2s.
 
 Self-contained executable manages Python environment and dependencies automatically.

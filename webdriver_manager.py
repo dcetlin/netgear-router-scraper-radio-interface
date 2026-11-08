@@ -24,11 +24,12 @@ class WebDriverManager:
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
         options.add_argument('--window-size=1280,720')
+        options.add_argument('--ignore-certificate-errors')  # router uses a self-signed cert
         options.add_experimental_option('excludeSwitches', ['enable-logging'])
         options.add_experimental_option('useAutomationExtension', False)
         
         if self.headless:
-            options.add_argument('--headless')
+            options.add_argument('--headless=new')
             self.logger.info("Running in headless mode")
         
         try:

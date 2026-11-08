@@ -5,13 +5,14 @@ Selenium-based tool for controlling Netgear router 2.4GHz radio via web interfac
 
 ## Architecture
 ```
-├── router_controller.py      # Main CLI and controller
+├── router_controller.py      # Main CLI and controller (Chrome only for on/off)
+├── router_http.py            # Browser-free login + radio state read
 ├── models.py                 # Data models and enums
 ├── logger.py                 # Logging system
 ├── network.py                # Network validation
 ├── credentials.py            # Keychain credential storage
 ├── webdriver_manager.py      # Chrome WebDriver management
-├── utils.py                  # Retry decorator and notifications
+├── utils.py                  # Notifications and output formatting
 ├── exceptions.py             # Custom exceptions
 └── config.example.yaml       # Configuration template
 ```

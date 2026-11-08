@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Router 2.4GHz Radio Controller"""
+"""Router 2.4GHz Radio Controller
+
+Reads radio state over plain HTTP (about 2s, no browser). Flips it by driving
+the router's own Advanced Wireless form in headless Chrome, because that form's
+JavaScript assembles the 80-odd fields the router expects. Every change is
+confirmed by re-reading the saved state from the router.
+"""
 
 import time
 from datetime import datetime
@@ -9,36 +15,23 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
 
 from models import RadioStatus, ActionResult, RouterConfig
 from logger import Logger
 from network import NetworkChecker
 from credentials import CredentialManager
 from webdriver_manager import WebDriverManager
-from utils import retry, send_notification, format_status_output
+from router_http import RouterHTTP
+from utils import send_notification, format_status_output
+
+WIRELESS_PAGE = "WLG_adv.htm"   # Advanced > Advanced Setup > Wireless Settings
+RADIO_CHECKBOX = "enable_ap"    # "Enable Wireless Router Radio" for 2.4 GHz
+CONFIRM_TIMEOUT = 30            # seconds to wait for the router to report the new state
 
 
 class RouterController:
     """Main controller for router radio management"""
-    
-    # Reusable CSS selectors for better performance
-    SELECTORS = {
-        'ssl_advanced': '#details-button',
-        'ssl_proceed': '#proceed-link',
-        'login_username': '[name="username"]',
-        'login_password': '[name="password"]',
-        'login_button': 'a[onclick*="login"]',
-        'advanced_button': '#advanced_bt',
-        'content_icons': '#content_icons',
-        'wireless_bgn': '#title_bgn',
-        'wireless_status': '#words_title div[class*="img_status"]',
-        'wireless_link': '#wladv',
-        'formframe': '[name="formframe"]',
-        'radio_checkbox': '#enable_ap',
-        'apply_button': '#apply'
-    }
-    
+
     def __init__(self, config: RouterConfig = None):
         self.config = config or RouterConfig.from_yaml()
         self.logger = Logger(dynamic=not self.config.debug_mode)
@@ -46,17 +39,18 @@ class RouterController:
         self.credential_manager = CredentialManager(self.logger, self.config.service_name)
         self.webdriver_manager = WebDriverManager(self.logger, self.config.headless, self.config.debug_mode)
         self.driver: Optional[webdriver.Chrome] = None
-    
+        self._http: Optional[RouterHTTP] = None
+
     def __enter__(self):
-        """Context manager entry"""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit with cleanup"""
-        self.logger.clear_line()  # Clear dynamic log line
+        self.logger.clear_line()
         self.webdriver_manager.cleanup()
-    
-    def _ensure_network_connection(self) -> tuple[bool, str]:
+
+    # --- preconditions -------------------------------------------------
+
+    def _ensure_network_connection(self) -> Tuple[bool, str]:
         """Verify network connectivity and VPN status"""
         if self.network_checker.is_vpn_connected():
             return False, "VPN_CONNECTED"
@@ -64,605 +58,170 @@ class RouterController:
             self.logger.error("Not connected to target network")
             return False, "NOT_CONNECTED_TO_ROUTER"
         return True, "OK"
-    
+
     def _get_credentials(self) -> Tuple[str, str]:
-        """Get admin credentials"""
         username, password = self.credential_manager.get_credentials()
         if not username or not password:
             username, password = self.credential_manager.prompt_for_credentials()
         return username, password
-    
-    def _find_element_in_frames(self, selector: str, max_wait: int = 5):
-        """Efficiently find element across main page and iframes"""
-        wait = WebDriverWait(self.driver, max_wait)
-        
-        # Try main page first
-        try:
-            return wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-        except TimeoutException:
-            pass
-        
-        # Try each iframe
-        iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
-        for i, iframe in enumerate(iframes):
-            try:
-                self.driver.switch_to.frame(iframe)
-                element = WebDriverWait(self.driver, 2).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                )
-                self.logger.debug(f"Found element in iframe {i}")
-                return element
-            except TimeoutException:
-                self.driver.switch_to.default_content()
-                continue
-        
-        raise TimeoutException(f"Element {selector} not found in main page or iframes")
-    
-    def _initialize_driver(self):
-        """Initialize WebDriver if needed"""
-        if not self.driver:
-            self.driver = self.webdriver_manager.create_driver()
-    
-    def _handle_ssl_warning(self) -> bool:
-        """Handle Chrome SSL certificate warning page"""
-        try:
-            wait = WebDriverWait(self.driver, 5)  # Shorter timeout for SSL check
-            
-            # Check if we're on the SSL warning page
-            if "Your connection is not private" in self.driver.page_source:
-                self.logger.info("SSL certificate warning detected, proceeding through warning")
-                
-                # Click "Advanced" button
-                advanced_button = wait.until(EC.element_to_be_clickable((By.ID, "details-button")))
-                advanced_button.click()
-                self.logger.debug("Clicked Advanced button")
-                
-                # Click "Proceed to routerlogin.net (unsafe)" link
-                proceed_link = wait.until(EC.element_to_be_clickable((By.ID, "proceed-link")))
-                proceed_link.click()
-                self.logger.info("Clicked proceed link, bypassing SSL warning")
-                
-                # Wait for page to change after SSL bypass
-                wait.until(lambda driver: "Your connection is not private" not in driver.page_source)
-                
-                return True
-            
-            return True  # No SSL warning found
-            
-        except TimeoutException:
-            self.logger.debug("No SSL warning page detected or elements not found")
-            return True  # Assume no SSL warning if elements not found
-        except Exception as e:
-            self.logger.warning(f"Error handling SSL warning: {e}")
-            return True  # Continue anyway
 
-    @retry(tries=3, delay=2)
-    def _login_to_router(self) -> bool:
-        """Login to router admin panel"""
-        try:
-            self.logger.info("Navigating to router login page")
-            self.driver.get(self.config.router_url)
-            
-            # Handle potential SSL certificate warning
-            if not self._handle_ssl_warning():
-                self.logger.error("Failed to handle SSL warning")
-                return False
-            
+    # --- reading state (no browser) -------------------------------------
+
+    def _router(self) -> RouterHTTP:
+        if self._http is None:
             username, password = self._get_credentials()
-            
-            # Wait for and fill login form
-            wait = WebDriverWait(self.driver, self.config.timeout)
-            username_field = wait.until(EC.presence_of_element_located((By.NAME, "username")))
-            password_field = self.driver.find_element(By.NAME, "password")
-            
-            username_field.send_keys(username)
-            password_field.send_keys(password)
-            
-            # Submit login - Router uses <a> tag with onclick, not input[type='submit']
-            login_button = self.driver.find_element(By.CSS_SELECTOR, "a[onclick*='login']")
-            login_button.click()
-            
-            self.logger.info("Login submitted, waiting for page load")
-            
-            # Wait for the page to actually change after login submission
-            # The router needs time to process login and redirect
-            time.sleep(2)
-            
-            # Wait for either admin panel or multi-login page to load
-            wait.until(lambda driver: any(indicator in driver.page_source.lower() 
-                                        for indicator in ['advanced', 'setup', 'wireless', 'multi_login']))
-            
-            # Check if we got redirected to multi-login page
-            current_url = self.driver.current_url
-            if "multi_login" in current_url.lower():
-                self.logger.info("Multi-login detected, handling concurrent session...")
-                
-                # Debug: save multi-login page
-                if self.config.debug_mode:
-                    with open('/tmp/multi_login_debug.html', 'w') as f:
-                        f.write(self.driver.page_source)
-                    self.logger.info("DEBUG: Multi-login page saved to /tmp/multi_login_debug.html")
-                
-                try:
-                    # Look for "Yes" button to kick out other session (based on actual multi-login page)
-                    yes_selectors = [
-                        "#yes",  # Primary: the actual Yes button ID
-                        "div[onclick*='login']",  # The Yes button has onclick="login()"
-                        "div:contains('Yes')",  # Fallback: any div containing "Yes"
-                        "input[value*='Yes']",
-                        "input[value*='yes']", 
-                        "input[value*='OK']",
-                        "button[type='submit']",
-                        "input[type='submit']"
-                    ]
-                    
-                    for selector in yes_selectors:
-                        try:
-                            yes_button = self.driver.find_element(By.CSS_SELECTOR, selector)
-                            yes_button.click()
-                            self.logger.info(f"Clicked proceed button: {selector}")
-                            # Wait for page to change after multi-login handling
-                            wait.until(lambda driver: "multi_login" not in driver.current_url.lower())
-                            new_url = self.driver.current_url
-                            self.logger.info(f"After multi-login handling, current URL: {new_url}")
-                            break
-                        except:
-                            continue
-                            
-                except Exception as e:
-                    self.logger.warning(f"Failed to handle multi-login: {e}")
-                    
-            # Final success check: look for admin panel indicators first
-            if any(indicator in self.driver.page_source.lower() for indicator in ['advanced', 'setup', 'wireless', 'router']):
-                self.logger.info("Successfully logged into admin panel")
-                return True
-            
-            # Check if we're still on login page (login failed)
-            elif "login" in current_url.lower():
-                # Additional check: make sure we're actually on login page, not just a URL with "login" in it
-                if self.driver.find_elements(By.NAME, "username") and self.driver.find_elements(By.NAME, "password"):
-                    self.logger.warning("Still on login page after submission, login may have failed")
-                    return False
-                
-            return True
-            
-        except TimeoutException:
-            self.logger.error("Login page did not load within timeout")
-            return False
-        except Exception as e:
-            self.logger.error(f"Login failed: {e}")
-            return False
-    
-    def _navigate_to_advanced_settings(self) -> bool:
-        """Navigate to advanced settings page"""
-        try:
-            self.logger.info("Navigating to advanced settings")
-            self.driver.get(self.config.admin_url)
-            
-            wait = WebDriverWait(self.driver, self.config.timeout)
-            
-            # Expand Advanced Setup
+            self._http = RouterHTTP(self.config.router_url, username, password, self.config.timeout)
+            self.logger.info("Logging in over HTTP")
+            self._http.login()
+        return self._http
+
+    def _radio_enabled(self) -> bool:
+        return self._router().radio_enabled()
+
+    # --- changing state (browser) ---------------------------------------
+
+    def _open_wireless_form(self):
+        """Log in through the real login page, then load the wireless form into its frame."""
+        username, password = self._get_credentials()
+        self.driver = self.webdriver_manager.create_driver()
+        wait = WebDriverWait(self.driver, max(self.config.timeout, 20))
+
+        self.logger.info("Opening router login page")
+        self.driver.get(self.config.router_url)
+        wait.until(lambda d: d.find_elements(By.NAME, "username"))
+        self.driver.find_element(By.NAME, "username").send_keys(username)
+        self.driver.find_element(By.NAME, "password").send_keys(password)
+        self.driver.execute_script("checklogin(document.forms[0])")
+
+        wait.until(lambda d: "multi_login" in d.current_url or "unauth" in d.current_url
+                   or d.execute_script("return typeof goto_formframe === 'function'"))
+        if "multi_login" in self.driver.current_url:
+            # Another admin session is open (e.g. a browser tab). Take over, as the UI's "Yes" does.
+            self.logger.info("Another admin session is open, taking over")
+            self.driver.find_element(By.ID, "yes").click()
+            wait.until(lambda d: d.execute_script("return typeof goto_formframe === 'function'"))
+        if "unauth" in self.driver.current_url:
+            raise RuntimeError("Router rejected the login")
+
+        self.logger.info("Opening wireless settings")
+        self.driver.execute_script(f"goto_formframe('{WIRELESS_PAGE}')")
+        wait.until(EC.frame_to_be_available_and_switch_to_it((By.ID, "formframe")))
+        return wait.until(lambda d: d.find_element(By.ID, RADIO_CHECKBOX))
+
+    def _apply_radio(self, enable: bool) -> None:
+        checkbox = self._open_wireless_form()
+        if checkbox.is_selected() != enable:
+            self.driver.execute_script("arguments[0].click()", checkbox)
+        self.logger.info("Applying")
+        self.driver.execute_script("arguments[0].click()", self.driver.find_element(By.ID, "apply"))
+        time.sleep(0.5)
+        try:  # some firmware versions confirm with a dialog
+            self.driver.switch_to.alert.accept()
+        except Exception:
+            pass
+
+    def _wait_for_state(self, enable: bool) -> bool:
+        self.logger.info("Confirming with the router")
+        deadline = time.time() + CONFIRM_TIMEOUT
+        while time.time() < deadline:
             try:
-                advanced_button = wait.until(
-                    EC.element_to_be_clickable((By.ID, "advanced_bt"))
-                )
-                advanced_button.click()
-            except Exception as e:
-                self.logger.error(f"Failed to find Advanced Setup button: {e}")
-                if self.config.debug_mode:
-                    # Debug: save page to see what we're actually looking at
-                    with open('/tmp/admin_page_debug.html', 'w') as f:
-                        f.write(self.driver.page_source)
-                    self.logger.info("DEBUG: Admin page saved to /tmp/admin_page_debug.html")
-                raise
-            self.logger.info("Advanced Setup button clicked, waiting for content to load...")
-            
-            # Check iframes first (where content typically loads for this router)
-            iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
-            for i, iframe in enumerate(iframes):
-                try:
-                    self.logger.debug(f"Checking iframe {i}")
-                    self.driver.switch_to.frame(iframe)
-                    # Use shorter wait since we know content loads quickly
-                    iframe_wait = WebDriverWait(self.driver, 6)
-                    iframe_wait.until(EC.presence_of_element_located((By.ID, "content_icons")))
-                    self.logger.info(f"Advanced settings content found in iframe {i}")
+                if self._radio_enabled() == enable:
                     return True
-                except:
-                    self.driver.switch_to.default_content()
-                    continue
-            
-            # Fallback: try main page if not found in iframes
-            self.logger.debug("content_icons not in iframes, checking main page...")
-            quick_wait = WebDriverWait(self.driver, 3)
-            try:
-                quick_wait.until(EC.presence_of_element_located((By.ID, "content_icons")))
-                self.logger.info("Advanced settings content loaded in main page")
-                return True
-            except:
-                pass
-            
-            # Final fallback with longer wait
-            self.logger.debug("Trying longer wait as final fallback...")
-            long_wait = WebDriverWait(self.driver, 10)
-            long_wait.until(EC.presence_of_element_located((By.ID, "content_icons")))
-            self.logger.info("Advanced settings content loaded (fallback)")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to navigate to advanced settings: {e}")
-            return False
-    
-    def _get_radio_status_from_ui(self) -> RadioStatus:
-        """Check radio status from UI elements"""
+            except Exception as e:  # router briefly busy while it applies
+                self.logger.debug(f"State check failed, retrying: {e}")
+            time.sleep(1)
+        return False
+
+    def _set_radio(self, enable: bool) -> ActionResult:
+        word = "on" if enable else "off"
+        self.logger.info(f"Turning {word} 2.4GHz radio")
+
+        ok, why = self._ensure_network_connection()
+        if not ok:
+            return ActionResult.VPN_CONNECTED if why == "VPN_CONNECTED" else ActionResult.NOT_CONNECTED_TO_ROUTER
+
         try:
-            wait = WebDriverWait(self.driver, self.config.timeout)
-            
-            # Debug: Save page source for inspection
-            if self.config.debug_mode:
-                with open('/tmp/router_admin_page_debug.html', 'w') as f:
+            if self._radio_enabled() == enable:
+                return ActionResult.ALREADY_ON if enable else ActionResult.ALREADY_OFF
+            self._apply_radio(enable)
+            if not self._wait_for_state(enable):
+                self.logger.error(f"Router did not report radio {word} within {CONFIRM_TIMEOUT}s")
+                return ActionResult.UNEXPECTED_FAILURE
+        except Exception as e:
+            self.logger.error(f"Failed to turn radio {word}: {e}")
+            if self.config.debug_mode and self.driver:
+                with open("/tmp/toggle_debug.html", "w") as f:
                     f.write(self.driver.page_source)
-                self.logger.info("DEBUG: Admin page source saved to /tmp/router_admin_page_debug.html")
-            
-            self.logger.debug("Looking for 2.4GHz Wireless Settings status in content area...")
-            
-            # First try to find content_icons div which contains all the status information
-            try:
-                content_div = self.driver.find_element(By.ID, "content_icons")
-                self.logger.debug("Found content_icons div")
-            except:
-                # If content_icons not found, the advanced section may not be expanded yet
-                # Try to wait a bit more or look for it in frames
-                self.logger.debug("content_icons not found, checking for iframe/frame")
-                
-                # Check if there's an iframe we need to switch to
-                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
-                if iframes:
-                    self.logger.debug(f"Found {len(iframes)} iframes, switching to first one")
-                    self.driver.switch_to.frame(iframes[0])
-                    # Wait for content to load in the iframe
-                    WebDriverWait(self.driver, 3).until(EC.presence_of_element_located((By.ID, "content_icons")))
-                    try:
-                        content_div = self.driver.find_element(By.ID, "content_icons")
-                        self.logger.debug("Found content_icons in iframe")
-                    except:
-                        self.driver.switch_to.default_content()
-                        raise Exception("content_icons not found in iframe either")
-                else:
-                    raise Exception("No content_icons div or iframes found")
-            
-            # Now look for the 2.4GHz wireless settings within content_icons
-            # Based on your HTML: <div id="title_bgn" class="adv_icon">
-            wireless_section = content_div.find_element(By.ID, "title_bgn")
-            self.logger.debug("Found title_bgn section (2.4GHz Wireless Settings)")
-            
-            # Look for the status indicator within this section
-            # Structure: <div id="words_title" class="title_doubleline">...<div class="img_status_*"></div>
-            title_div = wireless_section.find_element(By.ID, "words_title")
-            status_element = title_div.find_element(By.XPATH, ".//div[starts-with(@class, 'img_status')]")
-            status_class = status_element.get_attribute("class")
-            
-            self.logger.debug(f"Found status element with class: {status_class}")
-            
-            # Check status based on the class from your HTML
-            if "img_status_good" in status_class:
-                self.logger.info("Radio status: ON (img_status_good)")
-                return RadioStatus.RADIO_ON
-            elif "img_status_error" in status_class:
-                self.logger.info("Radio status: OFF (img_status_error)")
-                return RadioStatus.RADIO_OFF
-            elif "img_status_warning" in status_class:
-                self.logger.info("Radio status: OFF (img_status_warning)")
-                return RadioStatus.RADIO_OFF
-            else:
-                self.logger.warning(f"Unexpected status class: {status_class}")
-                return RadioStatus.UNEXPECTED_FAILURE
-                
-        except Exception as e:
-            self.logger.error(f"Failed to check radio status: {e}")
-            if self.config.debug_mode:
-                import traceback
-                self.logger.debug(f"Full traceback: {traceback.format_exc()}")
-                
-                # Additional debug: try to find any img_status elements
-                try:
-                    status_elements = self.driver.find_elements(By.XPATH, "//*[contains(@class, 'img_status')]")
-                    self.logger.debug(f"Found {len(status_elements)} img_status elements total")
-                    for i, elem in enumerate(status_elements[:5]):
-                        self.logger.debug(f"  Status element {i}: class='{elem.get_attribute('class')}', parent='{elem.find_element(By.XPATH, '..').get_attribute('id')}'")
-                except Exception as debug_e:
-                    self.logger.debug(f"Debug search failed: {debug_e}")
-                    
-            return RadioStatus.UNEXPECTED_FAILURE
-    
-    def _toggle_radio(self, enable: bool) -> ActionResult:
-        """Toggle radio on/off"""
-        try:
-            wait = WebDriverWait(self.driver, self.config.timeout)
-            
-            # First, make sure we have the content area loaded (same as status check)
-            try:
-                content_div = self.driver.find_element(By.ID, "content_icons")
-                self.logger.debug("Found content_icons div for toggle")
-            except:
-                # Check if content is in an iframe
-                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
-                if iframes:
-                    self.logger.debug(f"Switching to iframe for toggle")
-                    self.driver.switch_to.frame(iframes[1])  # Usually the content iframe
-                    try:
-                        content_div = self.driver.find_element(By.ID, "content_icons")
-                        self.logger.debug("Found content_icons in iframe for toggle")
-                    except:
-                        self.driver.switch_to.default_content()
-                        raise Exception("content_icons not found for toggle")
-                else:
-                    raise Exception("No content_icons div found for toggle")
-            
-            # Click on the "Wireless Settings" link in the navigation menu
-            # Based on HTML: <dt id="wladv" class="middle_name"><a target="formframe" onclick="click_adv_action('wladv');">
-            # First switch back to default content to access the navigation menu
-            self.driver.switch_to.default_content()
-            
-            self.logger.info("Clicking Wireless Settings link to navigate to configuration page")
-            wireless_link = wait.until(EC.element_to_be_clickable((By.ID, "wladv")))
-            wireless_link.click()
-            
-            # The wireless configuration form loads into a frame called "formframe"
-            # Switch to the formframe to access the actual wireless settings
-            try:
-                self.logger.debug("Switching to formframe to access wireless configuration")
-                formframe = wait.until(EC.presence_of_element_located((By.NAME, "formframe")))
-                self.driver.switch_to.frame(formframe)
-                # Wait for the form content (checkbox) to load
-                wait.until(EC.presence_of_element_located((By.ID, "enable_ap")))
-            except Exception as e:
-                self.logger.warning(f"Could not find formframe: {e}")
-                # Try by index if name doesn't work
-                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
-                for i, iframe in enumerate(iframes):
-                    if "form" in iframe.get_attribute("name").lower():
-                        self.driver.switch_to.frame(iframe)
-                        self.logger.debug(f"Switched to iframe {i} for wireless config")
-                        # Wait for the form content to load
-                        wait.until(EC.presence_of_element_located((By.ID, "enable_ap")))
-                        break
-            
-            # Now we should be in the wireless configuration frame
-            # Look for the "Enable Wireless Router Radio" checkbox
-            # Based on HTML: <input type="checkbox" name="enable_ap" id="enable_ap" value="1" onclick="check_schedule_onoff();">
-            self.logger.debug("Looking for Enable Wireless Router Radio checkbox")
-            try:
-                checkbox = wait.until(EC.presence_of_element_located((By.ID, "enable_ap")))
-                self.logger.debug("Found radio enable checkbox with ID: enable_ap")
-            except:
-                # Fallback selectors
-                checkbox_selectors = [
-                    "input[name='enable_ap']",
-                    "input[type='checkbox'][value='1']",
-                    "tr#ap_bgn input[type='checkbox']"
-                ]
-                
-                checkbox = None
-                for selector in checkbox_selectors:
-                    try:
-                        checkbox = self.driver.find_element(By.CSS_SELECTOR, selector)
-                        self.logger.debug(f"Found radio enable checkbox using fallback: {selector}")
-                        break
-                    except:
-                        continue
-                
-                if not checkbox:
-                    raise Exception("Could not find radio enable checkbox")
-            
-            is_currently_enabled = checkbox.is_selected()
-            self.logger.info(f"Current radio state: {'ON' if is_currently_enabled else 'OFF'}")
-            
-            if enable and is_currently_enabled:
-                self.logger.info("Radio already enabled")
-                return ActionResult.ALREADY_ON
-            elif not enable and not is_currently_enabled:
-                self.logger.info("Radio already disabled")
-                return ActionResult.ALREADY_OFF
-            
-            # Toggle checkbox if needed
-            if is_currently_enabled != enable:
-                # The checkbox has a label that intercepts clicks, so we'll click the label instead
-                # or use JavaScript to click the checkbox directly
-                try:
-                    # Try clicking the label first (more reliable)
-                    label = self.driver.find_element(By.CSS_SELECTOR, "label[for='enable_ap']")
-                    label.click()
-                    self.logger.info(f"Radio checkbox {'enabled' if enable else 'disabled'} (clicked label)")
-                except:
-                    # Fallback: use JavaScript to click the checkbox directly
-                    self.driver.execute_script("arguments[0].click();", checkbox)
-                    self.logger.info(f"Radio checkbox {'enabled' if enable else 'disabled'} (used JavaScript)")
-            
-            # Apply changes - look for Apply button
-            apply_selectors = [
-                "#apply",
-                "input[value='Apply']",
-                "input[type='submit'][value*='Apply']",
-                "button[value*='Apply']"
-            ]
-            
-            apply_button = None
-            for selector in apply_selectors:
-                try:
-                    apply_button = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    self.logger.debug(f"Found Apply button using: {selector}")
-                    break
-                except:
-                    continue
-            
-            if not apply_button:
-                raise Exception("Could not find Apply button")
-            
-            apply_button.click()
-            self.logger.info("Apply button clicked, waiting for changes to take effect")
-            
-            # Wait for either page refresh or success indicator
-            try:
-                # Wait for the page to refresh/redirect after applying changes
-                # The router typically shows a "Please wait..." message or redirects
-                wait.until(lambda driver: 
-                    "please wait" in driver.page_source.lower() or 
-                    driver.current_url != self.driver.current_url
-                )
-                # Additional short wait for settings to actually apply on router
-                time.sleep(3)
-            except TimeoutException:
-                # Fallback: fixed wait if we can't detect page change
-                time.sleep(5)
-            
-            result = ActionResult.SUCCESS
-            if self.config.enable_notifications:
-                action = "enabled" if enable else "disabled"
-                send_notification(
-                    "Router Radio Controller", 
-                    f"2.4GHz radio {action} successfully"
-                )
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"Failed to toggle radio: {e}")
-            if self.config.debug_mode:
-                import traceback
-                self.logger.debug(f"Toggle traceback: {traceback.format_exc()}")
-                # Save page source for debugging
-                try:
-                    with open('/tmp/toggle_debug.html', 'w') as f:
-                        f.write(self.driver.page_source)
-                    self.logger.info("DEBUG: Toggle page source saved to /tmp/toggle_debug.html")
-                except:
-                    pass
+                self.logger.info("DEBUG: page source saved to /tmp/toggle_debug.html")
             return ActionResult.UNEXPECTED_FAILURE
-    
+
+        if self.config.enable_notifications:
+            send_notification("Router Radio Controller", f"2.4GHz radio turned {word}")
+        return ActionResult.SUCCESS
+
+    # --- public API -----------------------------------------------------
+
     def check_radio_status(self) -> RadioStatus:
         """Check current radio status"""
         self.logger.info("Checking 2.4GHz radio status")
-        
-        connection_ok, connection_status = self._ensure_network_connection()
-        if not connection_ok:
-            if connection_status == "VPN_CONNECTED":
-                return RadioStatus.VPN_CONNECTED
-            return RadioStatus.NOT_CONNECTED_TO_ROUTER
-        
+        ok, why = self._ensure_network_connection()
+        if not ok:
+            return RadioStatus.VPN_CONNECTED if why == "VPN_CONNECTED" else RadioStatus.NOT_CONNECTED_TO_ROUTER
         try:
-            self._initialize_driver()
-            
-            if not self._login_to_router():
-                return RadioStatus.UNEXPECTED_FAILURE
-            
-            if not self._navigate_to_advanced_settings():
-                return RadioStatus.UNEXPECTED_FAILURE
-            
-            return self._get_radio_status_from_ui()
-            
+            return RadioStatus.RADIO_ON if self._radio_enabled() else RadioStatus.RADIO_OFF
         except Exception as e:
             self.logger.error(f"Unexpected error checking radio status: {e}")
             return RadioStatus.UNEXPECTED_FAILURE
-    
+
     def turn_on_radio(self) -> ActionResult:
-        """Turn on 2.4GHz radio"""
-        self.logger.info("Turning on 2.4GHz radio")
-        
-        connection_ok, connection_status = self._ensure_network_connection()
-        if not connection_ok:
-            if connection_status == "VPN_CONNECTED":
-                return ActionResult.VPN_CONNECTED
-            return ActionResult.NOT_CONNECTED_TO_ROUTER
-        
-        try:
-            self._initialize_driver()
-            
-            if not self._login_to_router():
-                return ActionResult.UNEXPECTED_FAILURE
-            
-            if not self._navigate_to_advanced_settings():
-                return ActionResult.UNEXPECTED_FAILURE
-            
-            return self._toggle_radio(enable=True)
-            
-        except Exception as e:
-            self.logger.error(f"Unexpected error turning on radio: {e}")
-            return ActionResult.UNEXPECTED_FAILURE
-    
+        return self._set_radio(True)
+
     def turn_off_radio(self) -> ActionResult:
-        """Turn off 2.4GHz radio"""
-        self.logger.info("Turning off 2.4GHz radio")
-        
-        connection_ok, connection_status = self._ensure_network_connection()
-        if not connection_ok:
-            if connection_status == "VPN_CONNECTED":
-                return ActionResult.VPN_CONNECTED
-            return ActionResult.NOT_CONNECTED_TO_ROUTER
-        
-        try:
-            self._initialize_driver()
-            
-            if not self._login_to_router():
-                return ActionResult.UNEXPECTED_FAILURE
-            
-            if not self._navigate_to_advanced_settings():
-                return ActionResult.UNEXPECTED_FAILURE
-            
-            return self._toggle_radio(enable=False)
-            
-        except Exception as e:
-            self.logger.error(f"Unexpected error turning off radio: {e}")
-            return ActionResult.UNEXPECTED_FAILURE
+        return self._set_radio(False)
 
 
 def main():
     """CLI interface"""
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description="Control Netgear router 2.4GHz radio",
         epilog="Examples:\n  status    Check radio status\n  on        Turn radio on\n  off       Turn radio off",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    
     parser.add_argument("action", choices=["status", "on", "off"], help="Action to perform")
     parser.add_argument("--headless", action="store_true", help="Run in background")
     parser.add_argument("--config", type=str, metavar="PATH", help="Custom config file")
     parser.add_argument("--notifications", action="store_true", help="Enable notifications")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    
     args = parser.parse_args()
 
     start_time = datetime.now()
-    
-    # Load configuration
+
     if args.config:
         from pathlib import Path
         config = RouterConfig.from_yaml(Path(args.config))
     else:
         config = RouterConfig.from_yaml()
-    
-    # Override config with CLI arguments
     if args.headless:
         config.headless = True
     if args.notifications:
         config.enable_notifications = True
     if args.debug:
         config.debug_mode = True
-    
+
     with RouterController(config) as controller:
         if args.action == "status":
             result = controller.check_radio_status()
-            print(format_status_output(result.value, "status"))
         elif args.action == "on":
             result = controller.turn_on_radio()
-            print(format_status_output(result.value, "on"))
-        elif args.action == "off":
+        else:
             result = controller.turn_off_radio()
-            print(format_status_output(result.value, "off"))
+        print(format_status_output(result.value, args.action))
 
     elapsed = datetime.now() - start_time
     print(f"Total Time: {elapsed.total_seconds():.1f}s")
+
 
 if __name__ == "__main__":
     main()

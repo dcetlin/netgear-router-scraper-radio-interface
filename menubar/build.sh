@@ -2,6 +2,7 @@
 # Builds "Router Radio.app" (menu bar app) and installs it to /Applications. No Xcode needed.
 set -euo pipefail
 cd "$(dirname "$0")"
+CONTROLLER="$(cd .. && pwd)/router_controller"
 APP="build/Router Radio.app"
 rm -rf build && mkdir -p "$APP/Contents/MacOS"
 swiftc -O -parse-as-library RouterRadio.swift -o "$APP/Contents/MacOS/RouterRadio"
@@ -16,6 +17,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
+  <key>RouterControllerPath</key><string>$CONTROLLER</string>
 </dict></plist>
 PLIST
 codesign --force -s - "$APP"

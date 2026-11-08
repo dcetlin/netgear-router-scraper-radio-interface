@@ -2,6 +2,21 @@
 
 Control your Netgear router's 2.4GHz radio via command line.
 
+## Setup on a new Mac
+
+Everything is in this repo except your router login, which stays in the Keychain.
+
+```bash
+xcode-select --install          # Swift compiler for the menu bar app (skip if already installed)
+git clone https://github.com/dcetlin/netgear-router-scraper-radio-interface.git router-radio-toggle
+cd router-radio-toggle
+./router_controller status      # first run: builds the venv, then asks for the router admin login and saves it to Keychain
+menubar/build.sh                # builds and installs /Applications/Router Radio.app
+open "/Applications/Router Radio.app"
+```
+
+Needs Google Chrome, and the Mac must be on the router's network (Ethernet or its Wi-Fi). Optional settings go in `~/.router_controller_config.yaml` (see `config.example.yaml`); the defaults work for the BE9300.
+
 ## Usage
 
 ```bash

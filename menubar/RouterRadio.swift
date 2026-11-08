@@ -4,7 +4,8 @@
 
 import SwiftUI
 
-let controllerPath = "/Users/dzc/Documents/Projects/router-radio-toggle/router_controller"
+// build.sh records where the repo lives, so the app works wherever it was cloned.
+let controllerPath = (Bundle.main.object(forInfoDictionaryKey: "RouterControllerPath") as? String) ?? ""
 let refreshInterval: TimeInterval = 15 * 60
 
 enum RadioState: Equatable {
